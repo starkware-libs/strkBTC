@@ -1,0 +1,37 @@
+[package]
+name = "strkbtc_token"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+starknet.workspace = true
+starkware_utils.workspace = true
+openzeppelin.workspace = true
+
+[dev-dependencies]
+assert_macros.workspace = true
+snforge_std.workspace = true
+starkware_utils_testing.workspace = true
+
+[lib]
+
+[[target.starknet-contract]]
+sierra = true
+casm = false
+
+[scripts]
+test = "snforge test"
+
+[tool.fmt]
+sort-module-level-items = true
+
+[tool]
+scarb.workspace = true
+
+[profile.dev.cairo]
+unstable-add-statements-code-locations-debug-info = true
+unstable-add-statements-functions-debug-info = true
+inlining-strategy = "avoid"
+
+[[test]]
+name = "strkbtc_token_unittest"
