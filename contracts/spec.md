@@ -10,10 +10,14 @@ classDiagram
         src5: SRC5Component
         roles: RolesComponent
         replaceability: ReplaceabilityComponent
+        ERC20_decimals: u8
+        permitted_minter: ContractAddress
 
         permissioned_mint()
         permissioned_burn()
         is_permitted_minter()
+        increase_allowance()
+        decrease_allowance()
     }
     class BridgeContract {
         accesscontrol: AccessControlComponent
@@ -21,17 +25,21 @@ classDiagram
         roles: RolesComponent
         replaceability: ReplaceabilityComponent
 
+        init_bridge()
         is_witnessed()
         witness_deposit()
         request_withdraw()
         register_signer()
         remove_signer()
+        revoke_signer()
         is_signer()
         register_user()
         remove_user()
         is_user()
         get_min_withdraw_amount()
         set_min_withdraw_amount()
+        get_quorum()
+        set_quorum()
     }
     class RegistryContract {
         accesscontrol: AccessControlComponent
@@ -43,6 +51,7 @@ classDiagram
         has_signed_withdraw()
         register_signer()
         remove_signer()
+        revoke_signer()
         is_signer()
     }
     class SignerSignatures {
@@ -59,16 +68,43 @@ classDiagram
         amount: u256
         btc_destination: ByteArray
     }
-    class DepositConfirmed {
+    class DepositMinted {
         btc_txid: ByteArray
         vout: u32
         amount: u256
         destination_address: ContractAddress
     }
+    class DepositWitnessed {
+        btc_txid: ByteArray
+        vout: u32
+        amount: u256
+        destination_address: ContractAddress
+        signer: ContractAddress
+    }
+    class SignerRegistered {
+        signer: ContractAddress
+        btc_public_key: ByteArray
+    }
+    class SignerRemoved {
+        signer: ContractAddress
+        btc_public_key: ByteArray
+        revoked: bool
+    }
+    class UserRegistered {
+        user: ContractAddress
+    }
+    class UserRemoved {
+        user: ContractAddress
+    }
     BridgeContract ..> WithdrawRequested : emits
-    BridgeContract ..> DepositConfirmed : emits
+    BridgeContract ..> DepositMinted : emits
+    BridgeContract ..> DepositWitnessed : emits
+    BridgeContract ..> SignerRegistered : emits
+    BridgeContract ..> SignerRemoved : emits
+    BridgeContract ..> UserRegistered : emits
+    BridgeContract ..> UserRemoved : emits
     BridgeContract --> TokenContract : mints / burns
-    BridgeContract --> RegistryContract : register / remove signer
+    BridgeContract --> RegistryContract : register / remove / revoke signer
     RegistryContract ..> WithdrawSigned : emits
     WithdrawSigned o-- SignerSignatures
 ```
@@ -77,30 +113,24 @@ classDiagram
 
 ## Token Contract
 
-The `strkBTC` token is an ERC-20 token on Starknet representing wrapped Bitcoin. It is
-minted when a BTC deposit is confirmed by the bridge and burned when a user requests a
-BTC withdrawal.
-
-### Constants
-
-| Name | Value | Description |
-|------|-------|-------------|
-| `NAME` | `'strkBTC'` | ERC-20 token name |
-| `SYMBOL` | `'strkBTC'` | ERC-20 token symbol |
-| `DECIMALS` | `8` | Matches Bitcoin's native precision |
+The `strkBTC` token is a Starkgate-compatible ERC-20 token on Starknet representing wrapped
+Bitcoin. It is minted when a BTC deposit is confirmed by the bridge and burned when a user
+requests a BTC withdrawal. The contract follows the Starkgate mintable token pattern with a
+single designated `permitted_minter` address (in this project the bridge contract).
 
 ### Storage
-
-The token contract extends standard OpenZeppelin components and adds no custom storage
-fields of its own. All balances and allowances are held in `ERC20Component::Storage`.
 
 ```rust
 struct Storage {
     erc20: ERC20Component::Storage,
     accesscontrol: AccessControlComponent::Storage,
     src5: SRC5Component::Storage,
-    roles: RolesComponent::Storage,
     replaceability: ReplaceabilityComponent::Storage,
+    roles: RolesComponent::Storage,
+    /// Custom decimals storage (named for legacy Starkgate compatibility).
+    ERC20_decimals: u8,
+    /// The single address authorized to mint and burn tokens.
+    permitted_minter: ContractAddress,
 }
 ```
 
@@ -119,6 +149,12 @@ struct Storage {
 ```rust
 fn constructor(
     ref self: ContractState,
+    name: ByteArray,
+    symbol: ByteArray,
+    decimals: u8,
+    initial_supply: u256,
+    recipient: ContractAddress,
+    permitted_minter: ContractAddress,
     governance_admin: ContractAddress,
     upgrade_delay: u64,
 )
@@ -126,9 +162,12 @@ fn constructor(
 
 #### Logic
 
-1. Initializes `RolesComponent` with `governance_admin` as the first governance admin.
-2. Initializes `ReplaceabilityComponent` with the given `upgrade_delay`.
-3. Initializes the ERC-20 metadata with `name = "strkBTC"` and `symbol = "strkBTC"`.
+1. Initializes the ERC-20 metadata with the given `name` and `symbol`.
+2. Sets `ERC20_decimals` to the given `decimals`.
+3. If `initial_supply > 0`, mints `initial_supply` tokens to `recipient`.
+4. Asserts `permitted_minter` is non-zero and writes it to storage.
+5. Initializes `RolesComponent` with `governance_admin` as the first governance admin.
+6. Initializes `ReplaceabilityComponent` with the given `upgrade_delay`.
 
 ### Functions
 
@@ -142,11 +181,11 @@ Mints `amount` tokens to `account`.
 
 ##### Access
 
-Only callable by an address with the `TOKEN_ADMIN` role.
+Only callable by the `permitted_minter` address.
 
 ##### Logic
 
-1. Asserts the caller holds `TOKEN_ADMIN` via `roles.only_token_admin()`.
+1. Asserts the caller is the `permitted_minter`.
 2. Calls `erc20.mint(account, amount)`.
 
 ---
@@ -161,11 +200,11 @@ Burns `amount` tokens from `account`.
 
 ##### Access
 
-Only callable by an address with the `TOKEN_ADMIN` role.
+Only callable by the `permitted_minter` address.
 
 ##### Logic
 
-1. Asserts the caller holds `TOKEN_ADMIN` via `roles.only_token_admin()`.
+1. Asserts the caller is the `permitted_minter`.
 2. Calls `erc20.burn(account, amount)`.
 
 ---
@@ -176,13 +215,38 @@ Only callable by an address with the `TOKEN_ADMIN` role.
 fn is_permitted_minter(self: @ContractState, account: ContractAddress) -> bool
 ```
 
-Returns `true` if `account` holds the `TOKEN_ADMIN` role, `false` otherwise.
+Returns `true` if `account` is the `permitted_minter`, `false` otherwise.
+
+---
+
+#### increase_allowance
+
+```rust
+fn increase_allowance(
+    ref self: ContractState, spender: ContractAddress, added_value: u256,
+) -> bool
+```
+
+Increases the caller's allowance for `spender` by `added_value`. Returns `true`.
+
+---
+
+#### decrease_allowance
+
+```rust
+fn decrease_allowance(
+    ref self: ContractState, spender: ContractAddress, subtracted_value: u256,
+) -> bool
+```
+
+Decreases the caller's allowance for `spender` by `subtracted_value`. Returns `true`.
 
 ### Errors
 
 | Error | Description |
 |-------|-------------|
-| `ONLY_TOKEN_ADMIN` | Caller does not hold the `TOKEN_ADMIN` role |
+| `INVALID_MINTER_ADDRESS` | `permitted_minter` passed to constructor is the zero address |
+| `MINTER_ONLY` | Caller is not the `permitted_minter` |
 
 ---
 
@@ -204,6 +268,15 @@ A unique identifier for a withdrawal, computed as a Poseidon hash of the raw tra
 type WithdrawId = felt252;
 ```
 
+#### BtcPublicKeyHash
+
+A Poseidon hash of a serialized BTC public key, used as a compact key for storage lookups
+and the blacklist.
+
+```rust
+type BtcPublicKeyHash = felt252;
+```
+
 ### Storage
 
 ```rust
@@ -214,6 +287,9 @@ struct Storage {
     replaceability: ReplaceabilityComponent::Storage,
     /// Maps a signer's Starknet address to their BTC public key.
     signers_to_pubkey: Map<ContractAddress, ByteArray>,
+    /// Blacklisted BTC public key hashes (revoked signers). Blacklisted keys are
+    /// excluded from signature aggregation.
+    btc_public_key_blacklist: Map<BtcPublicKeyHash, bool>,
     /// Withdrawal signature state, grouped in a storage node.
     withdraw_signatures: WithdrawSignaturesState,
 }
@@ -221,9 +297,10 @@ struct Storage {
 struct WithdrawSignaturesState {
     /// For each withdraw_id, the ordered list of BTC public keys that have signed.
     withdraw_id_to_signers: Map<WithdrawId, Vec<ByteArray>>,
-    /// For each (withdraw_id, btc_pubkey_hash) pair, the list of DER signatures submitted.
+    /// For each (withdraw_id, btc_pubkey_hash) pair, the list of signatures submitted to the given
+    /// withdraw_id by the given BTC public key (the hash of the public key).
     /// The btc_pubkey_hash is the Poseidon hash of the serialized BTC public key ByteArray.
-    withdraw_id_to_signatures: Map<(WithdrawId, felt252), Vec<ByteArray>>,
+    withdraw_id_to_signatures: Map<(WithdrawId, BtcPublicKeyHash), Vec<ByteArray>>,
 }
 ```
 
@@ -247,7 +324,7 @@ and the aggregated signatures from every signer who has signed so far.
 
 ```rust
 pub struct WithdrawSigned {
-    pub withdraw_id: felt252,
+    #[key] pub withdraw_id: felt252,
     pub raw_tx: ByteArray,
     pub signatures: Array<SignerSignatures>,
 }
@@ -293,7 +370,7 @@ Only callable by a registered signer.
 6. Computes `btc_pubkey_hash = poseidon_hash(btc_pubkey)`.
 7. If this is the first signature for this `btc_pubkey_hash` on this `withdraw_id`, appends `btc_pubkey` to `withdraw_id_to_signers[withdraw_id]`.
 8. Overwrites `withdraw_id_to_signatures[(withdraw_id, btc_pubkey_hash)]` with the new `signatures` (replacing any previous submission).
-9. Aggregates all pubkey-signature pairs for `withdraw_id` into `Array<SignerSignatures>`.
+9. Aggregates all pubkey-signature pairs for `withdraw_id` into `Array<SignerSignatures>`, skipping any signers whose `btc_pubkey_hash` is blacklisted.
 10. Emits `WithdrawSigned { withdraw_id, raw_tx, signatures }`.
 
 ---
@@ -329,12 +406,14 @@ Registers a new signer, associating their Starknet address with their Bitcoin pu
 
 ##### Access
 
-Only callable by an address with the `APP_GOVERNOR` role.
+Only callable by an address with the `APP_GOVERNOR` role (bridge contract).
 
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
-2. Writes `btc_pubkey` into `signers_to_pubkey[signer]`.
+2. Computes `btc_pubkey_hash = poseidon_hash(btc_pubkey)`.
+3. Asserts `btc_public_key_blacklist[btc_pubkey_hash]` is `false` (key was not revoked).
+4. Writes `btc_pubkey` into `signers_to_pubkey[signer]`.
 
 ---
 
@@ -348,12 +427,35 @@ Deregisters a signer.
 
 ##### Access
 
-Only callable by an address with the `APP_GOVERNOR` role.
+Only callable by an address with the `APP_GOVERNOR` role (bridge contract).
 
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
 2. Clears `signers_to_pubkey[signer]` (writes empty `ByteArray`).
+
+---
+
+#### revoke_signer
+
+```rust
+fn revoke_signer(ref self: ContractState, signer: ContractAddress)
+```
+
+Deregisters a signer and blacklists their BTC public key, preventing their previously
+submitted signatures from being included in future signature aggregations.
+
+##### Access
+
+Only callable by an address with the `APP_GOVERNOR` role (bridge contract).
+
+##### Logic
+
+1. Asserts caller holds `APP_GOVERNOR`.
+2. Reads `btc_pubkey` from `signers_to_pubkey[signer]`.
+3. Computes `btc_pubkey_hash = poseidon_hash(btc_pubkey)`.
+4. Sets `btc_public_key_blacklist[btc_pubkey_hash] = true`.
+5. Calls `remove_signer(signer)` to deregister the signer.
 
 ---
 
@@ -372,6 +474,7 @@ Returns `true` if `signer` is currently registered (i.e., has a non-empty BTC pu
 | `ONLY_SIGNER` | Caller is not a registered signer |
 | `EMPTY_SIGS` | `signatures` span is empty |
 | `EMPTY_RAW_TX` | `raw_tx` is empty |
+| `PUBLIC_KEY_BLACKLISTED` | BTC public key has been revoked and cannot be re-registered |
 
 ---
 
@@ -391,7 +494,6 @@ the two-way flow between Bitcoin and Starknet:
 
 | Name | Value | Description |
 |------|-------|-------------|
-| `MIN_WITHDRAW_AMOUNT` | `10_000_000` | Default minimum `strkBTC` amount (0.1 BTC) that can be withdrawn |
 | `MIN_QUORUM` | `2` | Minimum allowed quorum value |
 
 ### Types
@@ -404,14 +506,22 @@ A unique identifier for a deposit, computed as a Poseidon hash of the deposit pa
 pub type DepositId = felt252;
 ```
 
+#### BtcPublicKeyHash
+
+A Poseidon hash of a serialized BTC public key, used as a compact key for storage lookups.
+
+```rust
+pub type BtcPublicKeyHash = felt252;
+```
+
 #### DepositWitnesses
 
-Tracks which signers have witnessed a deposit and whether it has been confirmed (minted).
+Tracks which signers have witnessed a deposit and whether it has been minted.
 
 ```rust
 struct DepositWitnesses {
     witnesses: IterableMap<ContractAddress, bool>,
-    confirmed: bool,
+    minted: bool,
 }
 ```
 
@@ -423,22 +533,26 @@ struct Storage {
     src5: SRC5Component::Storage,
     roles: RolesComponent::Storage,
     replaceability: ReplaceabilityComponent::Storage,
+    /// Whether the bridge has been initialized via `init_bridge`.
+    bridge_initialized: bool,
     /// Dispatcher of the strkBTC token contract (mint/burn target).
     mintable_token: IMintableTokenDispatcher,
-    /// Dispatcher of the BridgeBitcoinRegistry contract.
+    /// Dispatcher of the Registry contract.
     registry: IRegistryDispatcher,
     /// Number of signer witnesses required to trigger a mint.
     quorum: u64,
     /// Minimum amount of strkBTC that can be withdrawn (configurable).
     min_withdraw_amount: u256,
     /// Whether a given Starknet address is an authorized user (for withdrawals).
-    autherized_users: Map<ContractAddress, bool>,
-    /// Maps a signer's Starknet address to the hash of their BTC public key.
-    signer_to_public_key: Map<ContractAddress, felt252>,
-    /// For each deposit, the set of signers who have witnessed it and its confirmation status.
+    authorized_users: Map<ContractAddress, bool>,
+    /// Maps a signer's Starknet address to their BTC public key.
+    signer_to_public_key: Map<ContractAddress, ByteArray>,
+    /// For each deposit, the set of signers who have witnessed it and its mint status.
     deposit_id_to_witnesses: Map<DepositId, DepositWitnesses>,
-    /// Maps a BTC public key hash to the Starknet address of the signer who registered it.
-    public_key_to_signer: Map<felt252, ContractAddress>,
+    /// Maps a BTC public key hash to the Starknet address of the signer who was registered with it.
+    public_key_hash_to_signer: Map<BtcPublicKeyHash, ContractAddress>,
+    /// Whether a given signer Starknet address is blacklisted (revoked).
+    signer_blacklist: Map<ContractAddress, bool>,
 }
 ```
 
@@ -451,23 +565,81 @@ signers listen for this event and co-sign the corresponding Bitcoin transaction.
 
 ```rust
 pub struct WithdrawRequested {
-    pub caller: ContractAddress,
+    #[key] pub caller: ContractAddress,
     pub amount: u256,
-    pub btc_destination: ByteArray,
+    #[key] pub btc_destination: ByteArray,
 }
 ```
 
-#### DepositConfirmed
+#### DepositMinted
 
 Emitted when a deposit reaches the quorum threshold and the corresponding `strkBTC` tokens
 are minted.
 
 ```rust
-pub struct DepositConfirmed {
-    pub btc_txid: ByteArray,
+pub struct DepositMinted {
+    #[key] pub btc_txid: ByteArray,
     pub vout: u32,
     pub amount: u256,
-    pub destination_address: ContractAddress,
+    #[key] pub destination_address: ContractAddress,
+}
+```
+
+#### DepositWitnessed
+
+Emitted each time a signer calls `witness_deposit`, regardless of whether quorum is reached.
+
+```rust
+pub struct DepositWitnessed {
+    #[key] pub btc_txid: ByteArray,
+    pub vout: u32,
+    pub amount: u256,
+    #[key] pub destination_address: ContractAddress,
+    #[key] pub signer: ContractAddress,
+}
+```
+
+#### SignerRegistered
+
+Emitted when a signer is registered via `register_signer`.
+
+```rust
+pub struct SignerRegistered {
+    #[key] pub signer: ContractAddress,
+    #[key] pub btc_public_key: ByteArray,
+}
+```
+
+#### SignerRemoved
+
+Emitted when a signer is removed via `remove_signer` or revoked via `revoke_signer`.
+The `revoked` field distinguishes between the two: `false` for removal, `true` for revocation.
+
+```rust
+pub struct SignerRemoved {
+    #[key] pub signer: ContractAddress,
+    #[key] pub btc_public_key: ByteArray,
+    pub revoked: bool,
+}
+```
+
+#### UserRegistered
+
+Emitted when a user is registered via `register_user`.
+
+```rust
+pub struct UserRegistered {
+    #[key] pub user: ContractAddress,
+}
+```
+
+#### UserRemoved
+
+Emitted when a user is removed via `remove_user`.
+
+```rust
+pub struct UserRemoved {
+    #[key] pub user: ContractAddress,
 }
 ```
 
@@ -478,9 +650,6 @@ fn constructor(
     ref self: ContractState,
     governance_admin: ContractAddress,
     upgrade_delay: u64,
-    token_address: ContractAddress,
-    registry_address: ContractAddress,
-    quorum: u64,
 )
 ```
 
@@ -488,10 +657,38 @@ fn constructor(
 
 1. Initializes `RolesComponent` with `governance_admin`.
 2. Initializes `ReplaceabilityComponent` with `upgrade_delay`.
+3. Sets `bridge_initialized` to `false`.
+
+---
+
+### init_bridge
+
+```rust
+fn init_bridge(
+    ref self: ContractState,
+    token_address: ContractAddress,
+    registry_address: ContractAddress,
+    quorum: u64,
+    min_withdraw_amount: u256,
+)
+```
+
+Initializes the bridge with the token, registry, quorum, and minimum withdrawal amount.
+Can only be called once.
+
+##### Access
+
+Only callable by an address with the `APP_GOVERNOR` role.
+
+##### Logic
+
+1. Asserts caller holds `APP_GOVERNOR`.
+2. Asserts `bridge_initialized` is `false`.
 3. Asserts `token_address` is non-zero.
 4. Asserts `registry_address` is non-zero.
 5. Asserts `quorum >= MIN_QUORUM`.
-6. Stores `mintable_token` dispatcher, `registry` dispatcher, `quorum`, and sets `min_withdraw_amount` to `MIN_WITHDRAW_AMOUNT`.
+6. Stores `mintable_token` dispatcher, `registry` dispatcher, `quorum`, and `min_withdraw_amount`.
+7. Sets `bridge_initialized` to `true`.
 
 ### Helpers
 
@@ -529,7 +726,7 @@ Returns `true` if `signer` has already witnessed the specified deposit.
 ##### Logic
 
 1. Computes `deposit_id = compute_deposit_id(btc_txid, vout, amount, destination_address)`.
-2. Returns whether `signer` exists in `deposit_id_to_witnesses[deposit_id].witnesses`.
+2. Returns `deposit_id_to_witnesses[deposit_id].has_witnessed(signer)`.
 
 ---
 
@@ -545,25 +742,26 @@ fn witness_deposit(
 )
 ```
 
-Records the caller's witness for a deposit. If this witness reaches the quorum threshold
-and the deposit has not already been confirmed, mints `amount` of `strkBTC` to
-`destination_address` and emits `DepositConfirmed`.
+Records the caller's witness for a deposit and emits `DepositWitnessed`. If the validated
+witness count reaches the quorum threshold and the deposit has not already been minted,
+mints `amount` of `strkBTC` to `destination_address` and emits `DepositMinted`.
 
 ##### Access
 
-Only callable by a registered signer.
+Only callable by a registered signer. Bridge must be initialized.
 
 ##### Logic
 
-1. Asserts caller is a registered signer (`signer_to_public_key[caller]` is non-zero).
-2. Computes `deposit_id = compute_deposit_id(btc_txid, vout, amount, destination_address)`.
-3. If caller has already witnessed this deposit, returns early (duplicate witness ignored).
-4. Writes `deposit_id_to_witnesses[deposit_id].witnesses[caller] = true`.
-5. Reads the witness count from `deposit_id_to_witnesses[deposit_id].witnesses.len()`.
-6. If `witness_count >= quorum` and the deposit is not already confirmed:
-   a. Sets `deposit_id_to_witnesses[deposit_id].confirmed = true`.
+1. Asserts caller is a registered signer (`signer_to_public_key[caller]` is non-empty).
+2. Asserts bridge is initialized.
+3. Computes `deposit_id = compute_deposit_id(btc_txid, vout, amount, destination_address)`.
+4. Calls `deposit_id_to_witnesses[deposit_id].mark_witnessed(caller)`.
+5. Emits `DepositWitnessed { btc_txid, vout, amount, destination_address, signer: caller }`.
+6. Computes `validated_witness_count` via `deposit_id_to_witnesses[deposit_id].get_validated_witness_count(signer_blacklist)`.
+7. If `validated_witness_count >= quorum` and `!deposit_id_to_witnesses[deposit_id].is_minted()`:
+   a. Calls `deposit_id_to_witnesses[deposit_id].mark_minted(true)`.
    b. Calls `mintable_token.permissioned_mint(destination_address, amount)`.
-   c. Emits `DepositConfirmed { btc_txid, vout, amount, destination_address }`.
+   c. Emits `DepositMinted { btc_txid, vout, amount, destination_address }`.
 
 ---
 
@@ -582,11 +780,12 @@ Only callable by an authorized user.
 
 ##### Logic
 
-1. Asserts caller is an authorized user (`autherized_users[caller]` is `true`).
-2. Asserts `amount >= min_withdraw_amount`.
-3. Asserts `btc_destination` is non-empty.
-4. Calls `mintable_token.permissioned_burn(caller, amount)`.
-5. Emits `WithdrawRequested { caller, amount, btc_destination }`.
+1. Asserts caller is an authorized user (`authorized_users[caller]` is `true`).
+2. Asserts bridge is initialized.
+3. Asserts `amount >= min_withdraw_amount`.
+4. Asserts `btc_destination` is non-empty.
+5. Calls `mintable_token.permissioned_burn(caller, amount)`.
+6. Emits `WithdrawRequested { caller, amount, btc_destination }`.
 
 ---
 
@@ -600,24 +799,28 @@ fn register_signer(
 )
 ```
 
-Authorizes a new signer to witness deposits and registers their BTC public key in the
-Registry contract.
+Authorizes a signer to witness deposits and registers their BTC public key in the
+Registry contract. A signer can be re-registered with a new public key (the previous
+public key mapping is overwritten).
 
 ##### Access
 
-Only callable by an address with the `APP_GOVERNOR` role.
+Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initialized.
 
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
-2. Asserts `signer` is non-zero.
-3. Asserts `btc_public_key` is non-empty.
-4. Asserts `signer_to_public_key[signer]` is zero (not already registered).
+2. Asserts bridge is initialized.
+3. Asserts `signer` is non-zero.
+4. Asserts `btc_public_key` is non-empty.
 5. Computes `btc_public_key_hash = compute_hash(btc_public_key)`.
-6. Asserts `public_key_to_signer[btc_public_key_hash]` is zero (BTC key not already in use).
-7. Writes `signer_to_public_key[signer] = btc_public_key_hash`.
-8. Writes `public_key_to_signer[btc_public_key_hash] = signer`.
-9. Calls `registry.register_signer(signer, btc_public_key)` on the Registry contract.
+6. Asserts `public_key_hash_to_signer[btc_public_key_hash]` is zero (BTC key not already in use).
+7. Asserts `signer_blacklist[signer]` is `false` (signer was not revoked).
+8. If `signer` already has a registered public key, clears the old `public_key_hash_to_signer` entry.
+9. Writes `signer_to_public_key[signer] = btc_public_key`.
+10. Writes `public_key_hash_to_signer[btc_public_key_hash] = signer`.
+11. Calls `registry.register_signer(signer, btc_public_key)` on the Registry contract.
+12. Emits `SignerRegistered { signer, btc_public_key }`.
 
 ---
 
@@ -627,20 +830,40 @@ Only callable by an address with the `APP_GOVERNOR` role.
 fn remove_signer(ref self: ContractState, signer: ContractAddress)
 ```
 
-Revokes a signer's authorization to witness deposits and removes them from the Registry.
+Removes a signer's authorization to witness deposits and removes them from the Registry.
+The signer is not blacklisted and their previous witnesses remain valid.
 
 ##### Access
 
-Only callable by an address with the `APP_GOVERNOR` role.
+Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initialized.
 
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
-2. Reads `btc_public_key_hash` from `signer_to_public_key[signer]`.
-3. Asserts `btc_public_key_hash` is non-zero (signer must be registered).
-4. Clears `signer_to_public_key[signer]` (writes zero).
-5. Clears `public_key_to_signer[btc_public_key_hash]` (writes zero).
-6. Calls `registry.remove_signer(signer)` on the Registry contract.
+2. Asserts bridge is initialized.
+3. Calls `internal_remove_signer(signer, revoked: false)`.
+
+---
+
+#### revoke_signer
+
+```rust
+fn revoke_signer(ref self: ContractState, signer: ContractAddress)
+```
+
+Removes a signer's authorization and blacklists their Starknet address. Blacklisted signers'
+witnesses are excluded from the validated witness count, effectively invalidating their
+previous witnesses for any deposits that have not yet been minted.
+
+##### Access
+
+Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initialized.
+
+##### Logic
+
+1. Asserts caller holds `APP_GOVERNOR`.
+2. Asserts bridge is initialized.
+3. Calls `internal_remove_signer(signer, revoked: true)`.
 
 ---
 
@@ -651,7 +874,7 @@ fn is_signer(self: @ContractState, signer: ContractAddress) -> bool
 ```
 
 Returns `true` if `signer` is currently authorized to witness deposits (i.e., has a
-non-zero entry in `signer_to_public_key`).
+non-empty `ByteArray` entry in `signer_to_public_key`).
 
 ---
 
@@ -665,13 +888,15 @@ Authorizes a new user to request withdrawals.
 
 ##### Access
 
-Only callable by an address with the `APP_GOVERNOR` role.
+Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initialized.
 
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
-2. Asserts `user` is non-zero.
-3. Sets `autherized_users[user] = true`.
+2. Asserts bridge is initialized.
+3. Asserts `user` is non-zero.
+4. Sets `authorized_users[user] = true`.
+5. Emits `UserRegistered { user }`.
 
 ---
 
@@ -685,13 +910,15 @@ Revokes a user's authorization to request withdrawals.
 
 ##### Access
 
-Only callable by an address with the `APP_GOVERNOR` role.
+Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initialized.
 
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
-2. Asserts `autherized_users[user]` is `true` (user must be registered).
-3. Sets `autherized_users[user] = false`.
+2. Asserts bridge is initialized.
+3. Asserts `authorized_users[user]` is `true` (user must be registered).
+4. Sets `authorized_users[user] = false`.
+5. Emits `UserRemoved { user }`.
 
 ---
 
@@ -711,7 +938,7 @@ Returns `true` if `user` is currently authorized to request withdrawals.
 fn get_min_withdraw_amount(self: @ContractState) -> u256
 ```
 
-Returns the current minimum withdrawal amount.
+Returns the current minimum withdrawal amount. Bridge must be initialized.
 
 ---
 
@@ -721,34 +948,143 @@ Returns the current minimum withdrawal amount.
 fn set_min_withdraw_amount(ref self: ContractState, min_withdraw_amount: u256)
 ```
 
-Updates the minimum withdrawal amount.
+Updates the minimum withdrawal amount. Can be set to zero to effectively disable the
+minimum check.
 
 ##### Access
 
-Only callable by an address with the `APP_GOVERNOR` role.
+Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initialized.
 
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
-2. Asserts `min_withdraw_amount > 0`.
+2. Asserts bridge is initialized.
 3. Writes `min_withdraw_amount` to storage.
+
+---
+
+#### get_quorum
+
+```rust
+fn get_quorum(self: @ContractState) -> u64
+```
+
+Returns the current quorum value. Bridge must be initialized.
+
+---
+
+#### set_quorum
+
+```rust
+fn set_quorum(ref self: ContractState, quorum: u64)
+```
+
+Updates the quorum value.
+
+##### Access
+
+Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initialized.
+
+##### Logic
+
+1. Asserts caller holds `APP_GOVERNOR`.
+2. Asserts bridge is initialized.
+3. Asserts `quorum >= MIN_QUORUM`.
+4. Writes `quorum` to storage.
+
+### DepositWitnesses Methods
+
+Methods on `StoragePath<DepositWitnesses>` (read-only):
+
+#### has_witnessed
+
+```rust
+fn has_witnessed(self: StoragePath<DepositWitnesses>, signer: ContractAddress) -> bool
+```
+
+Returns `true` if `signer` has a `true` witness entry. Checks that the entry is present
+and its value is `true`.
+
+#### is_minted
+
+```rust
+fn is_minted(self: StoragePath<DepositWitnesses>) -> bool
+```
+
+Returns the value of the `minted` flag for this deposit.
+
+#### get_validated_witness_count
+
+```rust
+fn get_validated_witness_count(
+    self: StoragePath<DepositWitnesses>,
+    signer_blacklist: StoragePath<Map<ContractAddress, bool>>,
+) -> u64
+```
+
+Returns the number of witnesses for a deposit that are not blacklisted. Iterates all
+witnesses in the `IterableMap` and counts only those where `witnessed` is `true` and the
+signer is not in `signer_blacklist`.
+
+Methods on `StoragePath<Mutable<DepositWitnesses>>` (mutable):
+
+#### mark_witnessed
+
+```rust
+fn mark_witnessed(ref self: StoragePath<Mutable<DepositWitnesses>>, signer: ContractAddress)
+```
+
+Writes `true` to `witnesses[signer]`.
+
+#### mark_minted
+
+```rust
+fn mark_minted(ref self: StoragePath<Mutable<DepositWitnesses>>, minted: bool)
+```
+
+Writes the `minted` flag.
+
+### Helpers
+
+#### internal_remove_signer
+
+```rust
+fn internal_remove_signer(ref self: ContractState, signer: ContractAddress, revoked: bool)
+```
+
+Shared implementation for `remove_signer` and `revoke_signer`.
+
+##### Logic
+
+1. Reads `btc_public_key` from `signer_to_public_key[signer]`.
+2. Asserts `btc_public_key` is non-empty (signer must be registered).
+3. Computes `btc_public_key_hash = compute_hash(btc_public_key)`.
+4. Clears `signer_to_public_key[signer]` (writes empty `ByteArray`).
+5. Clears `public_key_hash_to_signer[btc_public_key_hash]` (writes zero).
+6. If `revoked`:
+   a. Sets `signer_blacklist[signer] = true`.
+   b. Calls `registry.revoke_signer(signer)` on the Registry contract.
+7. If not `revoked`:
+   a. Calls `registry.remove_signer(signer)` on the Registry contract.
+8. Emits `SignerRemoved { signer, btc_public_key, revoked }`.
 
 ### Errors
 
 | Error | Description |
 |-------|-------------|
+| `BRIDGE_NOT_INITIALIZED` | Bridge has not been initialized via `init_bridge` |
+| `BRIDGE_ALREADY_INITIALIZED` | `init_bridge` has already been called |
 | `ONLY_SIGNER` | Caller is not a registered signer |
 | `ONLY_USER` | Caller is not an authorized user |
-| `DUP_SIGNER` | Signer address is already registered |
 | `DUP_PUBLIC_KEY` | BTC public key is already registered to another signer |
-| `SIGNER_NOT_REGISTERED` | Signer is not currently registered (on removal) |
+| `SIGNER_BLACKLISTED` | Signer's Starknet address has been revoked and cannot be re-registered |
+| `SIGNER_NOT_REGISTERED` | Signer is not currently registered (on removal/revocation) |
 | `USER_NOT_REGISTERED` | User is not currently registered (on removal) |
 | `ZERO_SIGNER` | Provided signer address is the zero address |
 | `ZERO_USER` | Provided user address is the zero address |
 | `ZERO_PUBLIC_KEY` | Provided BTC public key is empty |
-| `ZERO_TOKEN_ADDRESS` | Token address passed to constructor is zero |
-| `ZERO_REGISTRY_ADDRESS` | Registry address passed to constructor is zero |
+| `ZERO_TOKEN_ADDRESS` | Token address passed to `init_bridge` is zero |
+| `ZERO_REGISTRY_ADDRESS` | Registry address passed to `init_bridge` is zero |
 | `ZERO_BTC_DESTINATION` | BTC destination address is empty |
-| `ZERO_MIN_WITHDRAW_AMOUNT` | Minimum withdraw amount set to zero |
-| `INVALID_QUORUM` | Quorum passed to constructor is below `MIN_QUORUM` |
+| `INVALID_QUORUM` | Quorum is below `MIN_QUORUM` |
 | `INVALID_WITHDRAW_AMOUNT` | Withdrawal amount is below `min_withdraw_amount` |

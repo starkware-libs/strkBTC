@@ -5,8 +5,8 @@ use strkbtc_registry::events::{SignerSignatures, WithdrawSigned};
 use strkbtc_registry::interface::{IRegistryDispatcher, IRegistryDispatcherTrait};
 use strkbtc_registry::registry::registry::Event as RegistryEvent;
 use strkbtc_registry::tests::test_utils::{
-    APP_GOVERNOR, NON_SIGNER, SIGNER_ONE, SIGNER_TWO, compute_withdraw_id, deploy_registry,
-    pubkey_one, pubkey_two, raw_tx_a, raw_tx_b, raw_tx_c,
+    APP_GOVERNOR, NON_SIGNER, SIGNER_ONE, SIGNER_THREE, SIGNER_TWO, compute_withdraw_id,
+    deploy_registry, pubkey_one, pubkey_two, raw_tx_a, raw_tx_b, raw_tx_c,
 };
 #[test]
 fn test_has_signed_withdraw_flow() {
@@ -239,4 +239,134 @@ fn test_is_signer_false_for_unknown_address() {
     let registry = IRegistryDispatcher { contract_address: registry_address };
 
     assert(!registry.is_signer(NON_SIGNER), 'UNKNOWN_IS_SIGNER');
+}
+
+#[test]
+fn test_revoke_signer_excludes_from_aggregation() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    // Register two signers and have both sign the same tx.
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_ONE, pubkey_one());
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_TWO, pubkey_two());
+
+    let signer_one_sigs = array!["s1_sig"];
+    cheat_caller_address_once(registry_address, SIGNER_ONE);
+    registry.sign_withdraw(raw_tx_a(), signer_one_sigs.span());
+
+    let signer_two_sigs = array!["s2_sig"];
+    cheat_caller_address_once(registry_address, SIGNER_TWO);
+    registry.sign_withdraw(raw_tx_a(), signer_two_sigs.span());
+
+    // Revoke signer one.
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.revoke_signer(SIGNER_ONE);
+
+    // Have signer two re-sign so we get a fresh event with updated aggregation.
+    let mut spy = spy_events();
+    cheat_caller_address_once(registry_address, SIGNER_TWO);
+    registry.sign_withdraw(raw_tx_a(), signer_two_sigs.span());
+
+    let tx = raw_tx_a();
+    let withdraw_id = compute_withdraw_id(@tx);
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    registry_address,
+                    RegistryEvent::WithdrawSigned(
+                        WithdrawSigned {
+                            withdraw_id,
+                            raw_tx: raw_tx_a(),
+                            signatures: array![
+                                SignerSignatures {
+                                    btc_pubkey: pubkey_two(), signatures: array!["s2_sig"],
+                                },
+                            ],
+                        },
+                    ),
+                ),
+            ],
+        );
+}
+
+#[test]
+#[should_panic(expected: "ONLY_APP_GOVERNOR")]
+fn test_revoke_signer_non_governor_panics() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    cheat_caller_address_once(registry_address, NON_SIGNER);
+    registry.revoke_signer(SIGNER_ONE);
+}
+
+#[test]
+fn test_revoke_signer_has_signed_still_true() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_ONE, pubkey_one());
+
+    let signatures = array!["3044aa"];
+    cheat_caller_address_once(registry_address, SIGNER_ONE);
+    registry.sign_withdraw(raw_tx_a(), signatures.span());
+
+    // Revoke the signer — has_signed should still return true (it's a historical fact).
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.revoke_signer(SIGNER_ONE);
+
+    assert(registry.has_signed_withdraw(raw_tx_a(), pubkey_one()), 'REVOKE_ERASED_HISTORY');
+}
+
+#[test]
+fn test_revoke_signer_removes_signer() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_ONE, pubkey_one());
+    assert(registry.is_signer(SIGNER_ONE), 'SIGNER_NOT_REGISTERED');
+
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.revoke_signer(SIGNER_ONE);
+
+    assert(!registry.is_signer(SIGNER_ONE), 'SIGNER_NOT_REMOVED');
+}
+
+#[test]
+#[should_panic(expected: 'ONLY_SIGNER')]
+fn test_revoked_signer_cannot_sign() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_ONE, pubkey_one());
+
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.revoke_signer(SIGNER_ONE);
+
+    // Revoked signer is also removed, so sign_withdraw should panic.
+    let signatures = array!["sig_after_revoke"];
+    cheat_caller_address_once(registry_address, SIGNER_ONE);
+    registry.sign_withdraw(raw_tx_a(), signatures.span());
+}
+
+#[test]
+#[should_panic(expected: 'PUBLIC_KEY_BLACKLISTED')]
+fn test_register_signer_with_blacklisted_pubkey_panics() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    // Register and then revoke signer one — this blacklists pubkey_one.
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_ONE, pubkey_one());
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.revoke_signer(SIGNER_ONE);
+
+    // Attempt to register a different signer with the same blacklisted pubkey.
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_THREE, pubkey_one());
 }

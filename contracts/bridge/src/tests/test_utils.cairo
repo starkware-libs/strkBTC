@@ -4,7 +4,9 @@ use snforge_std::{ContractClass, ContractClassTrait, DeclareResult, declare};
 use starknet::ContractAddress;
 use starkware_utils::components::roles::interface::{IRolesDispatcher, IRolesDispatcherTrait};
 use starkware_utils_testing::test_utils::cheat_caller_address_once;
+use strkbtc_bridge::interface::{IBridgeDispatcher, IBridgeDispatcherTrait};
 
+pub const MIN_WITHDRAW_AMOUNT: u256 = 10_000_000; // 0.1 BTC
 pub const VOUT: u32 = 1;
 pub const DEPOSIT_AMOUNT: u256 = 1_000_000_000; // 10 BTC
 pub const WITHDRAW_AMOUNT: u256 = 100_000_000; // 1 BTC
@@ -62,21 +64,24 @@ pub fn deploy_mock_registry() -> ContractAddress {
 }
 
 pub fn deploy_bridge(
-    token_address: ContractAddress, registry_address: ContractAddress, quorum: u32,
+    token_address: ContractAddress, registry_address: ContractAddress, quorum: u64,
 ) -> ContractAddress {
     let class = declare_class("bridge");
     let mut calldata = array![];
     calldata.append_serde(GOVERNANCE_ADMIN);
     calldata.append_serde(0_u64);
-    calldata.append_serde(token_address);
-    calldata.append_serde(registry_address);
-    calldata.append_serde(quorum);
 
     let bridge_address = match class.deploy(@calldata) {
         Result::Ok((addr, _)) => addr,
         Result::Err(_) => panic!("bridge deploy failed"),
     };
     grant_roles(bridge_address);
+    let bridge = IBridgeDispatcher { contract_address: bridge_address };
+    cheat_caller_address_once(bridge_address, APP_GOVERNOR);
+    bridge
+        .init_bridge(
+            :token_address, :registry_address, :quorum, min_withdraw_amount: MIN_WITHDRAW_AMOUNT,
+        );
     bridge_address
 }
 

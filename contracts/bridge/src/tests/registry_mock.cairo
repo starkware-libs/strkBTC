@@ -30,6 +30,9 @@ pub mod registry_mock {
         fn remove_signer(ref self: ContractState, signer: ContractAddress) { // no-op
         }
 
+        fn revoke_signer(ref self: ContractState, signer: ContractAddress) { // no-op
+        }
+
         fn is_signer(self: @ContractState, signer: ContractAddress) -> bool {
             false
         }

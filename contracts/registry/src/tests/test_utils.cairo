@@ -11,6 +11,7 @@ pub const GOVERNANCE_ADMIN: ContractAddress = 0x999.try_into().unwrap();
 pub const APP_GOVERNOR: ContractAddress = 0x888.try_into().unwrap();
 pub const SIGNER_ONE: ContractAddress = 0x111.try_into().unwrap();
 pub const SIGNER_TWO: ContractAddress = 0x222.try_into().unwrap();
+pub const SIGNER_THREE: ContractAddress = 0x444.try_into().unwrap();
 pub const NON_SIGNER: ContractAddress = 0x333.try_into().unwrap();
 
 pub fn declare_class(name: ByteArray) -> ContractClass {
@@ -28,12 +29,6 @@ pub fn deploy_registry() -> ContractAddress {
     let mut calldata = array![];
     calldata.append_serde(GOVERNANCE_ADMIN);
     calldata.append_serde(0_u64);
-
-    // calldata.append_serde(2_u32);
-    // calldata.append_serde(signer_one());
-    // calldata.append_serde(pubkey_one());
-    // calldata.append_serde(signer_two());
-    // calldata.append_serde(pubkey_two());
 
     let registry_address = match class.deploy(@calldata) {
         Result::Ok((addr, _)) => addr,

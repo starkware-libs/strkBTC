@@ -6,6 +6,7 @@ pub struct SignerSignatures {
 
 #[derive(Drop, Serde, starknet::Event)]
 pub struct WithdrawSigned {
+    #[key]
     pub withdraw_id: felt252,
     pub raw_tx: ByteArray,
     pub signatures: Array<SignerSignatures>,

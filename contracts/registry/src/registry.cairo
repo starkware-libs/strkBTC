@@ -13,7 +13,7 @@ pub mod registry {
     use starkware_utils::components::replaceability::ReplaceabilityComponent::InternalReplaceabilityTrait;
     use starkware_utils::components::roles::RolesComponent;
     use starkware_utils::components::roles::RolesComponent::InternalTrait as RolesInternal;
-    use strkbtc_registry::errors::{EMPTY_RAW_TX, EMPTY_SIGS, ONLY_SIGNER};
+    use strkbtc_registry::errors::{EMPTY_RAW_TX, EMPTY_SIGS, ONLY_SIGNER, PUBLIC_KEY_BLACKLISTED};
     use strkbtc_registry::events::{SignerSignatures, WithdrawSigned};
     use strkbtc_registry::interface::IRegistry;
     use strkbtc_registry::utils::{ByteArrayZero, compute_hash, compute_withdraw_id, vec_to_array};
@@ -31,11 +31,12 @@ pub mod registry {
         ReplaceabilityComponent::ReplaceabilityImpl<ContractState>;
 
     type WithdrawId = felt252;
+    type BtcPublicKeyHash = felt252;
 
     #[starknet::storage_node]
     struct WithdrawSignaturesState {
         withdraw_id_to_signers: Map<WithdrawId, Vec<ByteArray>>,
-        withdraw_id_to_signatures: Map<(WithdrawId, felt252), Vec<ByteArray>>,
+        withdraw_id_to_signatures: Map<(WithdrawId, BtcPublicKeyHash), Vec<ByteArray>>,
     }
 
     #[storage]
@@ -49,7 +50,11 @@ pub mod registry {
         #[substorage(v0)]
         replaceability: ReplaceabilityComponent::Storage,
         /// Registry state variables
+        /// Maps signer address to their BTC public key
         signers_to_pubkey: Map<ContractAddress, ByteArray>,
+        /// Maps BTC public key hash to a boolean indicating if it is blacklisted
+        btc_public_key_blacklist: Map<BtcPublicKeyHash, bool>,
+        /// Withdrawal signature state, grouped in a storage node.
         withdraw_signatures: WithdrawSignaturesState,
     }
 
@@ -85,8 +90,13 @@ pub mod registry {
 
             self.withdraw_signatures.write_signatures(:withdraw_id, :btc_pubkey, :signatures);
 
-            let signatures = (@self).withdraw_signatures.aggregate_signatures(:withdraw_id);
-            self.emit(WithdrawSigned { withdraw_id, raw_tx, signatures });
+            let all_signatures = self
+                .withdraw_signatures
+                .as_non_mut()
+                .aggregate_signatures(
+                    :withdraw_id, btc_pubkey_blacklist: self.btc_public_key_blacklist.as_non_mut(),
+                );
+            self.emit(WithdrawSigned { withdraw_id, raw_tx, signatures: all_signatures });
         }
 
         fn has_signed_withdraw(
@@ -101,12 +111,23 @@ pub mod registry {
             ref self: ContractState, signer: ContractAddress, btc_pubkey: ByteArray,
         ) {
             self.roles.only_app_governor();
+            let btc_pubkey_hash: BtcPublicKeyHash = compute_hash(@btc_pubkey);
+            assert(!self.btc_public_key_blacklist.read(btc_pubkey_hash), PUBLIC_KEY_BLACKLISTED);
             self.signers_to_pubkey.write(signer, btc_pubkey.clone());
         }
 
         fn remove_signer(ref self: ContractState, signer: ContractAddress) {
             self.roles.only_app_governor();
             self.signers_to_pubkey.write(signer, Default::default());
+        }
+
+        fn revoke_signer(ref self: ContractState, signer: ContractAddress) {
+            self.roles.only_app_governor();
+            let btc_pubkey: ByteArray = self.signers_to_pubkey.read(signer);
+            let btc_pubkey_hash: BtcPublicKeyHash = compute_hash(@btc_pubkey);
+
+            self.btc_public_key_blacklist.write(btc_pubkey_hash, true);
+            self.remove_signer(signer);
         }
 
         fn is_signer(self: @ContractState, signer: ContractAddress) -> bool {
@@ -127,20 +148,25 @@ pub mod registry {
         fn has_signed(
             self: StoragePath<WithdrawSignaturesState>,
             withdraw_id: WithdrawId,
-            btc_pubkey_hash: felt252,
+            btc_pubkey_hash: BtcPublicKeyHash,
         ) -> bool {
             self.withdraw_id_to_signatures.entry((withdraw_id, btc_pubkey_hash)).len() > 0
         }
 
         fn aggregate_signatures(
-            self: StoragePath<WithdrawSignaturesState>, withdraw_id: WithdrawId,
+            self: StoragePath<WithdrawSignaturesState>,
+            withdraw_id: WithdrawId,
+            btc_pubkey_blacklist: StoragePath<Map<BtcPublicKeyHash, bool>>,
         ) -> Array<SignerSignatures> {
             let btc_pubkeys = self.withdraw_id_to_signers.entry(withdraw_id);
             let mut all_signatures: Array<SignerSignatures> = array![];
 
             for i in 0..btc_pubkeys.len() {
                 let btc_pubkey: ByteArray = btc_pubkeys.at(i).read();
-                let btc_pubkey_hash: felt252 = compute_hash(@btc_pubkey);
+                let btc_pubkey_hash: BtcPublicKeyHash = compute_hash(@btc_pubkey);
+                if btc_pubkey_blacklist.read(btc_pubkey_hash) {
+                    continue;
+                }
                 let signer_sigs = self
                     .withdraw_id_to_signatures
                     .entry((withdraw_id, btc_pubkey_hash));
@@ -160,7 +186,7 @@ pub mod registry {
             btc_pubkey: ByteArray,
             signatures: Span<ByteArray>,
         ) {
-            let btc_pubkey_hash: felt252 = compute_hash(@btc_pubkey);
+            let btc_pubkey_hash: BtcPublicKeyHash = compute_hash(@btc_pubkey);
             if !self.as_non_mut().has_signed(:withdraw_id, :btc_pubkey_hash) {
                 self.withdraw_id_to_signers.entry(withdraw_id).push(btc_pubkey.clone());
             }
