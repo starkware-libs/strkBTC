@@ -5,8 +5,8 @@ use strkbtc_registry::events::{SignerSignatures, WithdrawSigned};
 use strkbtc_registry::interface::{IRegistryDispatcher, IRegistryDispatcherTrait};
 use strkbtc_registry::registry::registry::Event as RegistryEvent;
 use strkbtc_registry::tests::test_utils::{
-    APP_GOVERNOR, NON_SIGNER, SIGNER_ONE, SIGNER_THREE, SIGNER_TWO, compute_withdraw_id,
-    deploy_registry, pubkey_one, pubkey_two, raw_tx_a, raw_tx_b, raw_tx_c,
+    APP_GOVERNOR, NON_SIGNER, SIGNER_ONE, SIGNER_THREE, SIGNER_TWO, byte_array_of_length,
+    compute_withdraw_id, deploy_registry, pubkey_one, pubkey_two, raw_tx_a, raw_tx_b, raw_tx_c,
 };
 #[test]
 fn test_has_signed_withdraw_flow() {
@@ -369,4 +369,83 @@ fn test_register_signer_with_blacklisted_pubkey_panics() {
     // Attempt to register a different signer with the same blacklisted pubkey.
     cheat_caller_address_once(registry_address, APP_GOVERNOR);
     registry.register_signer(SIGNER_THREE, pubkey_one());
+}
+
+#[test]
+#[should_panic(expected: 'SIG_TOO_LONG')]
+fn test_sign_withdraw_signature_too_long_panics() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_ONE, pubkey_one());
+
+    let long_sig = byte_array_of_length(161);
+    let signatures = array![long_sig];
+    cheat_caller_address_once(registry_address, SIGNER_ONE);
+    registry.sign_withdraw(raw_tx_a(), signatures.span());
+}
+
+#[test]
+#[should_panic(expected: 'TOO_MANY_SIGS')]
+fn test_sign_withdraw_too_many_signatures_panics() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_ONE, pubkey_one());
+
+    let mut signatures: Array<ByteArray> = array![];
+    for _ in 0_u32..41 {
+        signatures.append("aa");
+    }
+    cheat_caller_address_once(registry_address, SIGNER_ONE);
+    registry.sign_withdraw(raw_tx_a(), signatures.span());
+}
+
+#[test]
+fn test_sign_withdraw_at_max_span_size_succeeds() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_ONE, pubkey_one());
+
+    let mut signatures: Array<ByteArray> = array![];
+    for _ in 0_u32..40 {
+        signatures.append(byte_array_of_length(100));
+    }
+    cheat_caller_address_once(registry_address, SIGNER_ONE);
+    registry.sign_withdraw(raw_tx_a(), signatures.span());
+
+    assert(registry.has_signed_withdraw(raw_tx_a(), pubkey_one()), 'MAX_BOUNDS_FAILED');
+}
+
+#[test]
+fn test_sign_withdraw_single_signature_at_max_length_succeeds() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_ONE, pubkey_one());
+
+    let signatures = array![byte_array_of_length(160)];
+    cheat_caller_address_once(registry_address, SIGNER_ONE);
+    registry.sign_withdraw(raw_tx_a(), signatures.span());
+
+    assert(registry.has_signed_withdraw(raw_tx_a(), pubkey_one()), 'SINGLE_MAX_LEN_FAILED');
+}
+
+#[test]
+#[should_panic(expected: 'SIG_TOO_LONG')]
+fn test_sign_withdraw_one_valid_one_too_long_panics() {
+    let registry_address = deploy_registry();
+    let registry = IRegistryDispatcher { contract_address: registry_address };
+
+    cheat_caller_address_once(registry_address, APP_GOVERNOR);
+    registry.register_signer(SIGNER_ONE, pubkey_one());
+
+    let signatures = array!["valid_sig", byte_array_of_length(161)];
+    cheat_caller_address_once(registry_address, SIGNER_ONE);
+    registry.sign_withdraw(raw_tx_a(), signatures.span());
 }

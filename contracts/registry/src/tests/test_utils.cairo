@@ -72,3 +72,11 @@ pub fn raw_tx_b() -> ByteArray {
 pub fn raw_tx_c() -> ByteArray {
     "0011223344"
 }
+
+pub fn byte_array_of_length(len: usize) -> ByteArray {
+    let mut ba: ByteArray = "";
+    for _ in 0..len {
+        ba.append_byte('a');
+    }
+    ba
+}

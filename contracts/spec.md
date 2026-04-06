@@ -96,6 +96,14 @@ classDiagram
     class UserRemoved {
         user: ContractAddress
     }
+    class MinWithdrawAmountSet {
+        old_min_withdraw_amount: u256
+        new_min_withdraw_amount: u256
+    }
+    class DepositQuorumSet {
+        old_deposit_quorum: u64
+        new_deposit_quorum: u64
+    }
     BridgeContract ..> WithdrawRequested : emits
     BridgeContract ..> DepositMinted : emits
     BridgeContract ..> DepositWitnessed : emits
@@ -103,6 +111,8 @@ classDiagram
     BridgeContract ..> SignerRemoved : emits
     BridgeContract ..> UserRegistered : emits
     BridgeContract ..> UserRemoved : emits
+    BridgeContract ..> MinWithdrawAmountSet : emits
+    BridgeContract ..> DepositQuorumSet : emits
     BridgeContract --> TokenContract : mints / burns
     BridgeContract --> RegistryContract : register / remove / revoke signer
     RegistryContract ..> WithdrawSigned : emits
@@ -116,7 +126,7 @@ classDiagram
 The `strkBTC` token is a Starkgate-compatible ERC-20 token on Starknet representing wrapped
 Bitcoin. It is minted when a BTC deposit is confirmed by the bridge and burned when a user
 requests a BTC withdrawal. The contract follows the Starkgate mintable token pattern with a
-single designated `permitted_minter` address (in this project the bridge contract).
+single designated `permitted_minter` address (typically the bridge contract).
 
 ### Storage
 
@@ -286,7 +296,7 @@ struct Storage {
     roles: RolesComponent::Storage,
     replaceability: ReplaceabilityComponent::Storage,
     /// Maps a signer's Starknet address to their BTC public key.
-    signers_to_pubkey: Map<ContractAddress, ByteArray>,
+    signers_to_public_key: Map<ContractAddress, ByteArray>,
     /// Blacklisted BTC public key hashes (revoked signers). Blacklisted keys are
     /// excluded from signature aggregation.
     btc_public_key_blacklist: Map<BtcPublicKeyHash, bool>,
@@ -297,10 +307,9 @@ struct Storage {
 struct WithdrawSignaturesState {
     /// For each withdraw_id, the ordered list of BTC public keys that have signed.
     withdraw_id_to_signers: Map<WithdrawId, Vec<ByteArray>>,
-    /// For each (withdraw_id, btc_pubkey_hash) pair, the list of signatures submitted to the given
-    /// withdraw_id by the given BTC public key (the hash of the public key).
+    /// For each (withdraw_id, btc_pubkey_hash) pair, the list of DER signatures submitted.
     /// The btc_pubkey_hash is the Poseidon hash of the serialized BTC public key ByteArray.
-    withdraw_id_to_signatures: Map<(WithdrawId, BtcPublicKeyHash), Vec<ByteArray>>,
+    withdraw_id_to_signatures: Map<(WithdrawId, felt252), Vec<ByteArray>>,
 }
 ```
 
@@ -345,6 +354,13 @@ fn constructor(
 1. Initializes `RolesComponent` with `governance_admin`.
 2. Initializes `ReplaceabilityComponent` with `upgrade_delay`.
 
+### Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `MAX_SIGNATURE_LENGTH` | 160 | Maximum length of a single hex-encoded DER Bitcoin signature (73 bytes × 2 + 14 bytes buffer) |
+| `MAX_SIGNATURES_COUNT` | 40 | Maximum number of signatures (one per input UTXO) per `sign_withdraw` call |
+
 ### Functions
 
 #### sign_withdraw
@@ -362,16 +378,18 @@ Only callable by a registered signer.
 
 ##### Logic
 
-1. Asserts caller is a registered signer (`signers_to_pubkey` entry is non-empty).
+1. Asserts caller is a registered signer (`signers_to_public_key` entry is non-empty).
 2. Asserts `raw_tx` is non-empty.
 3. Asserts `signatures` is non-empty.
-4. Reads caller's `btc_pubkey` from `signers_to_pubkey`.
-5. Computes `withdraw_id = poseidon_hash(raw_tx)`.
-6. Computes `btc_pubkey_hash = poseidon_hash(btc_pubkey)`.
-7. If this is the first signature for this `btc_pubkey_hash` on this `withdraw_id`, appends `btc_pubkey` to `withdraw_id_to_signers[withdraw_id]`.
-8. Overwrites `withdraw_id_to_signatures[(withdraw_id, btc_pubkey_hash)]` with the new `signatures` (replacing any previous submission).
-9. Aggregates all pubkey-signature pairs for `withdraw_id` into `Array<SignerSignatures>`, skipping any signers whose `btc_pubkey_hash` is blacklisted.
-10. Emits `WithdrawSigned { withdraw_id, raw_tx, signatures }`.
+4. Asserts `signatures` span length ≤ `MAX_SIGNATURES_COUNT` (40).
+5. Asserts each signature length ≤ `MAX_SIGNATURE_LENGTH` (160 hex characters, i.e. 80 bytes).
+6. Reads caller's `btc_pubkey` from `signers_to_public_key`.
+7. Computes `withdraw_id = poseidon_hash(raw_tx)`.
+8. Computes `btc_pubkey_hash = poseidon_hash(btc_pubkey)`.
+9. If this is the first signature for this `btc_pubkey_hash` on this `withdraw_id`, appends `btc_pubkey` to `withdraw_id_to_signers[withdraw_id]`.
+10. Overwrites `withdraw_id_to_signatures[(withdraw_id, btc_pubkey_hash)]` with the new `signatures` (replacing any previous submission).
+11. Aggregates all pubkey-signature pairs for `withdraw_id` into `Array<SignerSignatures>`, skipping any signers whose `btc_pubkey_hash` is blacklisted.
+12. Emits `WithdrawSigned { withdraw_id, raw_tx, signatures }`.
 
 ---
 
@@ -406,14 +424,14 @@ Registers a new signer, associating their Starknet address with their Bitcoin pu
 
 ##### Access
 
-Only callable by an address with the `APP_GOVERNOR` role (bridge contract).
+Only callable by an address with the `APP_GOVERNOR` role.
 
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
 2. Computes `btc_pubkey_hash = poseidon_hash(btc_pubkey)`.
 3. Asserts `btc_public_key_blacklist[btc_pubkey_hash]` is `false` (key was not revoked).
-4. Writes `btc_pubkey` into `signers_to_pubkey[signer]`.
+4. Writes `btc_pubkey` into `signers_to_public_key[signer]`.
 
 ---
 
@@ -427,12 +445,12 @@ Deregisters a signer.
 
 ##### Access
 
-Only callable by an address with the `APP_GOVERNOR` role (bridge contract).
+Only callable by an address with the `APP_GOVERNOR` role.
 
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
-2. Clears `signers_to_pubkey[signer]` (writes empty `ByteArray`).
+2. Clears `signers_to_public_key[signer]` (writes empty `ByteArray`).
 
 ---
 
@@ -447,12 +465,12 @@ submitted signatures from being included in future signature aggregations.
 
 ##### Access
 
-Only callable by an address with the `APP_GOVERNOR` role (bridge contract).
+Only callable by an address with the `APP_GOVERNOR` role.
 
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
-2. Reads `btc_pubkey` from `signers_to_pubkey[signer]`.
+2. Reads `btc_pubkey` from `signers_to_public_key[signer]`.
 3. Computes `btc_pubkey_hash = poseidon_hash(btc_pubkey)`.
 4. Sets `btc_public_key_blacklist[btc_pubkey_hash] = true`.
 5. Calls `remove_signer(signer)` to deregister the signer.
@@ -475,6 +493,8 @@ Returns `true` if `signer` is currently registered (i.e., has a non-empty BTC pu
 | `EMPTY_SIGS` | `signatures` span is empty |
 | `EMPTY_RAW_TX` | `raw_tx` is empty |
 | `PUBLIC_KEY_BLACKLISTED` | BTC public key has been revoked and cannot be re-registered |
+| `SIG_TOO_LONG` | A signature exceeds maximum length (160 hex characters) |
+| `TOO_MANY_SIGS` | Too many signatures in span (max 40) |
 
 ---
 
@@ -537,10 +557,10 @@ struct Storage {
     bridge_initialized: bool,
     /// Dispatcher of the strkBTC token contract (mint/burn target).
     mintable_token: IMintableTokenDispatcher,
-    /// Dispatcher of the Registry contract.
+    /// Dispatcher of the BridgeBitcoinRegistry contract.
     registry: IRegistryDispatcher,
     /// Number of signer witnesses required to trigger a mint.
-    quorum: u64,
+    deposit_quorum: u64,
     /// Minimum amount of strkBTC that can be withdrawn (configurable).
     min_withdraw_amount: u256,
     /// Whether a given Starknet address is an authorized user (for withdrawals).
@@ -549,7 +569,7 @@ struct Storage {
     signer_to_public_key: Map<ContractAddress, ByteArray>,
     /// For each deposit, the set of signers who have witnessed it and its mint status.
     deposit_id_to_witnesses: Map<DepositId, DepositWitnesses>,
-    /// Maps a BTC public key hash to the Starknet address of the signer who was registered with it.
+    /// Maps a BTC public key hash to the Starknet address of the signer who registered it.
     public_key_hash_to_signer: Map<BtcPublicKeyHash, ContractAddress>,
     /// Whether a given signer Starknet address is blacklisted (revoked).
     signer_blacklist: Map<ContractAddress, bool>,
@@ -640,6 +660,28 @@ Emitted when a user is removed via `remove_user`.
 ```rust
 pub struct UserRemoved {
     #[key] pub user: ContractAddress,
+}
+```
+
+#### MinWithdrawAmountSet
+
+Emitted when the minimum withdrawal amount is updated via `set_min_withdraw_amount`.
+
+```rust
+pub struct MinWithdrawAmountSet {
+    pub old_min_withdraw_amount: u256,
+    pub new_min_withdraw_amount: u256,
+}
+```
+
+#### DepositQuorumSet
+
+Emitted when the deposit quorum is updated via `set_quorum`.
+
+```rust
+pub struct DepositQuorumSet {
+    pub old_deposit_quorum: u64,
+    pub new_deposit_quorum: u64,
 }
 ```
 
@@ -895,8 +937,9 @@ Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initial
 1. Asserts caller holds `APP_GOVERNOR`.
 2. Asserts bridge is initialized.
 3. Asserts `user` is non-zero.
-4. Sets `authorized_users[user] = true`.
-5. Emits `UserRegistered { user }`.
+4. Asserts `authorized_users[user]` is `false` (user not already registered).
+5. Sets `authorized_users[user] = true`.
+6. Emits `UserRegistered { user }`.
 
 ---
 
@@ -959,7 +1002,9 @@ Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initial
 
 1. Asserts caller holds `APP_GOVERNOR`.
 2. Asserts bridge is initialized.
-3. Writes `min_withdraw_amount` to storage.
+3. Reads `old_min_withdraw_amount` from storage.
+4. Writes `min_withdraw_amount` to storage.
+5. Emits `MinWithdrawAmountSet { old_min_withdraw_amount, new_min_withdraw_amount: min_withdraw_amount }`.
 
 ---
 
@@ -990,7 +1035,9 @@ Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initial
 1. Asserts caller holds `APP_GOVERNOR`.
 2. Asserts bridge is initialized.
 3. Asserts `quorum >= MIN_QUORUM`.
-4. Writes `quorum` to storage.
+4. Reads `old_deposit_quorum` from storage.
+5. Writes `quorum` to `deposit_quorum` in storage.
+6. Emits `DepositQuorumSet { old_deposit_quorum, new_deposit_quorum: quorum }`.
 
 ### DepositWitnesses Methods
 
@@ -1079,6 +1126,7 @@ Shared implementation for `remove_signer` and `revoke_signer`.
 | `DUP_PUBLIC_KEY` | BTC public key is already registered to another signer |
 | `SIGNER_BLACKLISTED` | Signer's Starknet address has been revoked and cannot be re-registered |
 | `SIGNER_NOT_REGISTERED` | Signer is not currently registered (on removal/revocation) |
+| `USER_ALREADY_REGISTERED` | User is already registered |
 | `USER_NOT_REGISTERED` | User is not currently registered (on removal) |
 | `ZERO_SIGNER` | Provided signer address is the zero address |
 | `ZERO_USER` | Provided user address is the zero address |

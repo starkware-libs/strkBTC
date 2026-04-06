@@ -13,7 +13,9 @@ pub mod registry {
     use starkware_utils::components::replaceability::ReplaceabilityComponent::InternalReplaceabilityTrait;
     use starkware_utils::components::roles::RolesComponent;
     use starkware_utils::components::roles::RolesComponent::InternalTrait as RolesInternal;
-    use strkbtc_registry::errors::{EMPTY_RAW_TX, EMPTY_SIGS, ONLY_SIGNER, PUBLIC_KEY_BLACKLISTED};
+    use strkbtc_registry::errors::{
+        EMPTY_RAW_TX, EMPTY_SIGS, ONLY_SIGNER, PUBLIC_KEY_BLACKLISTED, SIG_TOO_LONG, TOO_MANY_SIGS,
+    };
     use strkbtc_registry::events::{SignerSignatures, WithdrawSigned};
     use strkbtc_registry::interface::IRegistry;
     use strkbtc_registry::utils::{ByteArrayZero, compute_hash, compute_withdraw_id, vec_to_array};
@@ -32,6 +34,13 @@ pub mod registry {
 
     type WithdrawId = felt252;
     type BtcPublicKeyHash = felt252;
+    type Signature = ByteArray;
+
+    /// Maximum length of a single hex-encoded DER Bitcoin signature (73 bytes × 2 + 14 bytes
+    /// buffer).
+    const MAX_SIGNATURE_LENGTH: usize = 160;
+    /// Maximum number of signatures (one per input UTXO) in a single sign_withdraw call.
+    const MAX_SIGNATURES_COUNT: usize = 40;
 
     #[starknet::storage_node]
     struct WithdrawSignaturesState {
@@ -51,7 +60,7 @@ pub mod registry {
         replaceability: ReplaceabilityComponent::Storage,
         /// Registry state variables
         /// Maps signer address to their BTC public key
-        signers_to_pubkey: Map<ContractAddress, ByteArray>,
+        signers_to_public_key: Map<ContractAddress, ByteArray>,
         /// Maps BTC public key hash to a boolean indicating if it is blacklisted
         btc_public_key_blacklist: Map<BtcPublicKeyHash, bool>,
         /// Withdrawal signature state, grouped in a storage node.
@@ -83,9 +92,9 @@ pub mod registry {
         fn sign_withdraw(ref self: ContractState, raw_tx: ByteArray, signatures: Span<ByteArray>) {
             self.assert_signer();
             assert(raw_tx.is_non_zero(), EMPTY_RAW_TX);
-            assert(signatures.len() > 0, EMPTY_SIGS);
+            self.assert_valid_signatures_span_sizes(signatures);
 
-            let btc_pubkey: ByteArray = self.signers_to_pubkey.read(get_caller_address());
+            let btc_pubkey: ByteArray = self.signers_to_public_key.read(get_caller_address());
             let withdraw_id: WithdrawId = compute_withdraw_id(@raw_tx);
 
             self.withdraw_signatures.write_signatures(:withdraw_id, :btc_pubkey, :signatures);
@@ -113,17 +122,17 @@ pub mod registry {
             self.roles.only_app_governor();
             let btc_pubkey_hash: BtcPublicKeyHash = compute_hash(@btc_pubkey);
             assert(!self.btc_public_key_blacklist.read(btc_pubkey_hash), PUBLIC_KEY_BLACKLISTED);
-            self.signers_to_pubkey.write(signer, btc_pubkey.clone());
+            self.signers_to_public_key.write(signer, btc_pubkey.clone());
         }
 
         fn remove_signer(ref self: ContractState, signer: ContractAddress) {
             self.roles.only_app_governor();
-            self.signers_to_pubkey.write(signer, Default::default());
+            self.signers_to_public_key.write(signer, Default::default());
         }
 
         fn revoke_signer(ref self: ContractState, signer: ContractAddress) {
             self.roles.only_app_governor();
-            let btc_pubkey: ByteArray = self.signers_to_pubkey.read(signer);
+            let btc_pubkey: ByteArray = self.signers_to_public_key.read(signer);
             let btc_pubkey_hash: BtcPublicKeyHash = compute_hash(@btc_pubkey);
 
             self.btc_public_key_blacklist.write(btc_pubkey_hash, true);
@@ -131,7 +140,7 @@ pub mod registry {
         }
 
         fn is_signer(self: @ContractState, signer: ContractAddress) -> bool {
-            self.signers_to_pubkey.read(signer).is_non_zero()
+            self.signers_to_public_key.read(signer).is_non_zero()
         }
     }
 
@@ -139,7 +148,19 @@ pub mod registry {
     impl InternalImpl of InternalTrait {
         fn assert_signer(self: @ContractState) {
             let caller = get_caller_address();
-            assert(self.signers_to_pubkey.read(caller).is_non_zero(), ONLY_SIGNER);
+            assert(self.signers_to_public_key.read(caller).is_non_zero(), ONLY_SIGNER);
+        }
+
+        fn assert_valid_signatures_span_sizes(self: @ContractState, span: Span<Signature>) {
+            assert(span.len() > 0, EMPTY_SIGS);
+            assert(span.len() <= MAX_SIGNATURES_COUNT, TOO_MANY_SIGS);
+            for signature in span {
+                self.assert_valid_signature_length(signature.clone());
+            };
+        }
+
+        fn assert_valid_signature_length(self: @ContractState, signature: Signature) {
+            assert(signature.len() <= MAX_SIGNATURE_LENGTH, SIG_TOO_LONG);
         }
     }
 

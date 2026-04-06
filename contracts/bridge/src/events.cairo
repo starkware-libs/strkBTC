@@ -60,3 +60,15 @@ pub struct UserRemoved {
     #[key]
     pub user: ContractAddress,
 }
+
+#[derive(Drop, starknet::Event)]
+pub struct MinWithdrawAmountSet {
+    pub old_min_withdraw_amount: u256,
+    pub new_min_withdraw_amount: u256,
+}
+
+#[derive(Drop, starknet::Event)]
+pub struct DepositQuorumSet {
+    pub old_deposit_quorum: u64,
+    pub new_deposit_quorum: u64,
+}

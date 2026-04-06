@@ -2,3 +2,5 @@ pub const EMPTY_SIGS: felt252 = 'EMPTY_SIGS';
 pub const EMPTY_RAW_TX: felt252 = 'EMPTY_RAW_TX';
 pub const ONLY_SIGNER: felt252 = 'ONLY_SIGNER';
 pub const PUBLIC_KEY_BLACKLISTED: felt252 = 'PUBLIC_KEY_BLACKLISTED';
+pub const SIG_TOO_LONG: felt252 = 'SIG_TOO_LONG';
+pub const TOO_MANY_SIGS: felt252 = 'TOO_MANY_SIGS';

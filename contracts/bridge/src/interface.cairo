@@ -41,9 +41,9 @@ pub trait IBridge<TContractState> {
     fn get_min_withdraw_amount(self: @TContractState) -> u256;
     /// Sets the minimum withdrawal amount.
     fn set_min_withdraw_amount(ref self: TContractState, min_withdraw_amount: u256);
-    /// Returns the quorum.
+    /// Returns the deposit quorum.
     fn get_quorum(self: @TContractState) -> u64;
-    /// Sets the quorum.
+    /// Sets the deposit quorum.
     fn set_quorum(ref self: TContractState, quorum: u64);
     /// Initializes the bridge.
     fn init_bridge(

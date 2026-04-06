@@ -21,12 +21,12 @@ pub mod bridge {
     use strkbtc_bridge::errors::{
         BRIDGE_ALREADY_INITIALIZED, BRIDGE_NOT_INITIALIZED, DUP_PUBLIC_KEY, INVALID_QUORUM,
         INVALID_WITHDRAW_AMOUNT, ONLY_SIGNER, ONLY_USER, SIGNER_BLACKLISTED, SIGNER_NOT_REGISTERED,
-        USER_NOT_REGISTERED, ZERO_BTC_DESTINATION, ZERO_PUBLIC_KEY, ZERO_REGISTRY_ADDRESS,
-        ZERO_SIGNER, ZERO_TOKEN_ADDRESS, ZERO_USER,
+        USER_ALREADY_REGISTERED, USER_NOT_REGISTERED, ZERO_BTC_DESTINATION, ZERO_PUBLIC_KEY,
+        ZERO_REGISTRY_ADDRESS, ZERO_SIGNER, ZERO_TOKEN_ADDRESS, ZERO_USER,
     };
     use strkbtc_bridge::events::{
-        DepositMinted, DepositWitnessed, SignerRegistered, SignerRemoved, UserRegistered,
-        UserRemoved, WithdrawRequested,
+        DepositMinted, DepositQuorumSet, DepositWitnessed, MinWithdrawAmountSet, SignerRegistered,
+        SignerRemoved, UserRegistered, UserRemoved, WithdrawRequested,
     };
     use strkbtc_bridge::interface::IBridge;
     use strkbtc_bridge::utils::compute_deposit_id;
@@ -70,7 +70,7 @@ pub mod bridge {
         bridge_initialized: bool,
         mintable_token: IMintableTokenDispatcher, // Dispatcher of the token contract.
         registry: IRegistryDispatcher, // Dispatcher of the registry contract.
-        quorum: u64, // Number of signers required to witness a deposit and withdraw
+        deposit_quorum: u64, // Number of signers required to witness a deposit
         min_withdraw_amount: u256, // Minimum amount of strkBTC that can be withdrawn.
         // Whether a given Starknet address is an authorized user.
         authorized_users: Map<ContractAddress, bool>,
@@ -102,6 +102,8 @@ pub mod bridge {
         SignerRemoved: SignerRemoved,
         UserRegistered: UserRegistered,
         UserRemoved: UserRemoved,
+        MinWithdrawAmountSet: MinWithdrawAmountSet,
+        DepositQuorumSet: DepositQuorumSet,
     }
 
     #[constructor]
@@ -153,7 +155,7 @@ pub mod bridge {
             let deposit_witnesses = deposit_witnesses_mutable.as_non_mut();
             let validated_witness_count = deposit_witnesses
                 .get_validated_witness_count(self.signer_blacklist.as_non_mut());
-            let quorum = self.quorum.read();
+            let quorum = self.deposit_quorum.read();
 
             if validated_witness_count >= quorum && !deposit_witnesses.is_minted() {
                 deposit_witnesses_mutable.mark_minted(true);
@@ -222,6 +224,7 @@ pub mod bridge {
             self.roles.only_app_governor();
             self.assert_initialized();
             assert(user.is_non_zero(), ZERO_USER);
+            assert(!self.authorized_users.read(user), USER_ALREADY_REGISTERED);
             self.authorized_users.write(user, true);
             self.emit(UserRegistered { user });
         }
@@ -246,19 +249,34 @@ pub mod bridge {
         fn set_min_withdraw_amount(ref self: ContractState, min_withdraw_amount: u256) {
             self.roles.only_app_governor();
             self.assert_initialized();
+            let old_min_withdraw_amount = self.min_withdraw_amount.read();
             self.min_withdraw_amount.write(min_withdraw_amount);
+            self
+                .emit(
+                    MinWithdrawAmountSet {
+                        old_min_withdraw_amount: old_min_withdraw_amount,
+                        new_min_withdraw_amount: min_withdraw_amount,
+                    },
+                );
         }
 
         fn get_quorum(self: @ContractState) -> u64 {
             self.assert_initialized();
-            self.quorum.read()
+            self.deposit_quorum.read()
         }
 
         fn set_quorum(ref self: ContractState, quorum: u64) {
             self.roles.only_app_governor();
             self.assert_initialized();
             assert(quorum >= MIN_QUORUM, INVALID_QUORUM);
-            self.quorum.write(quorum);
+            let old_deposit_quorum = self.deposit_quorum.read();
+            self.deposit_quorum.write(quorum);
+            self
+                .emit(
+                    DepositQuorumSet {
+                        old_deposit_quorum: old_deposit_quorum, new_deposit_quorum: quorum,
+                    },
+                );
         }
         fn init_bridge(
             ref self: ContractState,
@@ -278,7 +296,7 @@ pub mod bridge {
 
             self.mintable_token.write(mintable_token);
             self.registry.write(registry);
-            self.quorum.write(quorum);
+            self.deposit_quorum.write(quorum);
             self.min_withdraw_amount.write(min_withdraw_amount);
             self.bridge_initialized.write(true);
         }
