@@ -262,7 +262,7 @@ Decreases the caller's allowance for `spender` by `subtracted_value`. Returns `t
 
 ## Registry Contract
 
-The `BridgeBitcoinRegistry` contract manages the set of authorized Bitcoin bridge signers
+The `Registry` contract manages the set of authorized Bitcoin bridge signers
 and records their Bitcoin signatures for pending withdrawals. When a signer submits
 signatures for a withdrawal transaction, the contract emits an event containing the
 aggregated signatures from all signers who have signed so far, enabling off-chain relayers
@@ -296,7 +296,7 @@ struct Storage {
     roles: RolesComponent::Storage,
     replaceability: ReplaceabilityComponent::Storage,
     /// Maps a signer's Starknet address to their BTC public key.
-    signers_to_public_key: Map<ContractAddress, ByteArray>,
+    signer_to_public_key: Map<ContractAddress, ByteArray>,
     /// Blacklisted BTC public key hashes (revoked signers). Blacklisted keys are
     /// excluded from signature aggregation.
     btc_public_key_blacklist: Map<BtcPublicKeyHash, bool>,
@@ -378,12 +378,12 @@ Only callable by a registered signer.
 
 ##### Logic
 
-1. Asserts caller is a registered signer (`signers_to_public_key` entry is non-empty).
+1. Asserts caller is a registered signer (`signer_to_public_key` entry is non-empty).
 2. Asserts `raw_tx` is non-empty.
 3. Asserts `signatures` is non-empty.
 4. Asserts `signatures` span length ≤ `MAX_SIGNATURES_COUNT` (40).
 5. Asserts each signature length ≤ `MAX_SIGNATURE_LENGTH` (160 hex characters, i.e. 80 bytes).
-6. Reads caller's `btc_pubkey` from `signers_to_public_key`.
+6. Reads caller's `btc_pubkey` from `signer_to_public_key`.
 7. Computes `withdraw_id = poseidon_hash(raw_tx)`.
 8. Computes `btc_pubkey_hash = poseidon_hash(btc_pubkey)`.
 9. If this is the first signature for this `btc_pubkey_hash` on this `withdraw_id`, appends `btc_pubkey` to `withdraw_id_to_signers[withdraw_id]`.
@@ -431,7 +431,7 @@ Only callable by an address with the `APP_GOVERNOR` role.
 1. Asserts caller holds `APP_GOVERNOR`.
 2. Computes `btc_pubkey_hash = poseidon_hash(btc_pubkey)`.
 3. Asserts `btc_public_key_blacklist[btc_pubkey_hash]` is `false` (key was not revoked).
-4. Writes `btc_pubkey` into `signers_to_public_key[signer]`.
+4. Writes `btc_pubkey` into `signer_to_public_key[signer]`.
 
 ---
 
@@ -450,7 +450,7 @@ Only callable by an address with the `APP_GOVERNOR` role.
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
-2. Clears `signers_to_public_key[signer]` (writes empty `ByteArray`).
+2. Clears `signer_to_public_key[signer]` (writes empty `ByteArray`).
 
 ---
 
@@ -470,7 +470,7 @@ Only callable by an address with the `APP_GOVERNOR` role.
 ##### Logic
 
 1. Asserts caller holds `APP_GOVERNOR`.
-2. Reads `btc_pubkey` from `signers_to_public_key[signer]`.
+2. Reads `btc_pubkey` from `signer_to_public_key[signer]`.
 3. Computes `btc_pubkey_hash = poseidon_hash(btc_pubkey)`.
 4. Sets `btc_public_key_blacklist[btc_pubkey_hash] = true`.
 5. Calls `remove_signer(signer)` to deregister the signer.
@@ -557,7 +557,7 @@ struct Storage {
     bridge_initialized: bool,
     /// Dispatcher of the strkBTC token contract (mint/burn target).
     mintable_token: IMintableTokenDispatcher,
-    /// Dispatcher of the BridgeBitcoinRegistry contract.
+    /// Dispatcher of the Registry contract.
     registry: IRegistryDispatcher,
     /// Number of signer witnesses required to trigger a mint.
     deposit_quorum: u64,
@@ -1003,8 +1003,9 @@ Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initial
 1. Asserts caller holds `APP_GOVERNOR`.
 2. Asserts bridge is initialized.
 3. Reads `old_min_withdraw_amount` from storage.
-4. Writes `min_withdraw_amount` to storage.
-5. Emits `MinWithdrawAmountSet { old_min_withdraw_amount, new_min_withdraw_amount: min_withdraw_amount }`.
+4. Asserts `old_min_withdraw_amount != min_withdraw_amount` (value must actually change).
+5. Writes `min_withdraw_amount` to storage.
+6. Emits `MinWithdrawAmountSet { old_min_withdraw_amount, new_min_withdraw_amount: min_withdraw_amount }`.
 
 ---
 
@@ -1036,8 +1037,9 @@ Only callable by an address with the `APP_GOVERNOR` role. Bridge must be initial
 2. Asserts bridge is initialized.
 3. Asserts `quorum >= MIN_QUORUM`.
 4. Reads `old_deposit_quorum` from storage.
-5. Writes `quorum` to `deposit_quorum` in storage.
-6. Emits `DepositQuorumSet { old_deposit_quorum, new_deposit_quorum: quorum }`.
+5. Asserts `old_deposit_quorum != quorum` (value must actually change).
+6. Writes `quorum` to `deposit_quorum` in storage.
+7. Emits `DepositQuorumSet { old_deposit_quorum, new_deposit_quorum: quorum }`.
 
 ### DepositWitnesses Methods
 
@@ -1136,3 +1138,5 @@ Shared implementation for `remove_signer` and `revoke_signer`.
 | `ZERO_BTC_DESTINATION` | BTC destination address is empty |
 | `INVALID_QUORUM` | Quorum is below `MIN_QUORUM` |
 | `INVALID_WITHDRAW_AMOUNT` | Withdrawal amount is below `min_withdraw_amount` |
+| `MIN_WITHDRAW_AMOUNT_NOT_CHANGED` | New minimum withdrawal amount is the same as the current value |
+| `QUORUM_NOT_CHANGED` | New quorum is the same as the current value |

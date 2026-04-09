@@ -7,8 +7,8 @@ use starkware_utils::interfaces::mintable_token::{
 use starkware_utils_testing::test_utils::cheat_caller_address_once;
 use strkbtc_bridge::bridge::bridge::Event as BridgeEvent;
 use strkbtc_bridge::events::{
-    DepositMinted, DepositWitnessed, SignerRegistered, SignerRemoved, UserRegistered, UserRemoved,
-    WithdrawRequested,
+    DepositMinted, DepositQuorumSet, DepositWitnessed, MinWithdrawAmountSet, SignerRegistered,
+    SignerRemoved, UserRegistered, UserRemoved, WithdrawRequested,
 };
 use strkbtc_bridge::interface::{IBridgeDispatcher, IBridgeDispatcherTrait};
 use strkbtc_bridge::tests::mintable_token_mock::{
@@ -283,6 +283,46 @@ fn test_set_min_withdraw_amount_updates_value() {
 }
 
 #[test]
+#[should_panic(expected: 'MIN_WITHDRAW_AMOUNT_NOT_CHANGED')]
+fn test_set_min_withdraw_amount_same_value_panics() {
+    let token = deploy_mock_token();
+    let registry = deploy_mock_registry();
+    let bridge_address = deploy_bridge(token, registry, 2);
+    let bridge = IBridgeDispatcher { contract_address: bridge_address };
+
+    let current_min = bridge.get_min_withdraw_amount();
+    cheat_caller_address_once(bridge_address, APP_GOVERNOR);
+    bridge.set_min_withdraw_amount(current_min);
+}
+
+#[test]
+fn test_set_min_withdraw_amount_emits_event() {
+    let token = deploy_mock_token();
+    let registry = deploy_mock_registry();
+    let bridge_address = deploy_bridge(token, registry, 2);
+    let bridge = IBridgeDispatcher { contract_address: bridge_address };
+
+    let mut spy = spy_events();
+    let new_min: u256 = 50_000_000;
+    cheat_caller_address_once(bridge_address, APP_GOVERNOR);
+    bridge.set_min_withdraw_amount(new_min);
+
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    bridge_address,
+                    BridgeEvent::MinWithdrawAmountSet(
+                        MinWithdrawAmountSet {
+                            old_min_withdraw_amount: 10_000_000, new_min_withdraw_amount: new_min,
+                        },
+                    ),
+                ),
+            ],
+        );
+}
+
+#[test]
 #[should_panic(expected: "ONLY_APP_GOVERNOR")]
 fn test_set_min_withdraw_amount_non_governor_panics() {
     let token = deploy_mock_token();
@@ -409,6 +449,42 @@ fn test_set_quorum_below_min_panics() {
 
     cheat_caller_address_once(bridge_address, APP_GOVERNOR);
     bridge.set_quorum(1);
+}
+
+#[test]
+#[should_panic(expected: 'QUORUM_NOT_CHANGED')]
+fn test_set_quorum_same_value_panics() {
+    let token = deploy_mock_token();
+    let registry = deploy_mock_registry();
+    let bridge_address = deploy_bridge(token, registry, 2);
+    let bridge = IBridgeDispatcher { contract_address: bridge_address };
+
+    cheat_caller_address_once(bridge_address, APP_GOVERNOR);
+    bridge.set_quorum(2);
+}
+
+#[test]
+fn test_set_quorum_emits_event() {
+    let token = deploy_mock_token();
+    let registry = deploy_mock_registry();
+    let bridge_address = deploy_bridge(token, registry, 2);
+    let bridge = IBridgeDispatcher { contract_address: bridge_address };
+
+    let mut spy = spy_events();
+    cheat_caller_address_once(bridge_address, APP_GOVERNOR);
+    bridge.set_quorum(5);
+
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    bridge_address,
+                    BridgeEvent::DepositQuorumSet(
+                        DepositQuorumSet { old_deposit_quorum: 2, new_deposit_quorum: 5 },
+                    ),
+                ),
+            ],
+        );
 }
 
 #[test]

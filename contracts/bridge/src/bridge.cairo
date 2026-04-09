@@ -20,9 +20,10 @@ pub mod bridge {
     };
     use strkbtc_bridge::errors::{
         BRIDGE_ALREADY_INITIALIZED, BRIDGE_NOT_INITIALIZED, DUP_PUBLIC_KEY, INVALID_QUORUM,
-        INVALID_WITHDRAW_AMOUNT, ONLY_SIGNER, ONLY_USER, SIGNER_BLACKLISTED, SIGNER_NOT_REGISTERED,
-        USER_ALREADY_REGISTERED, USER_NOT_REGISTERED, ZERO_BTC_DESTINATION, ZERO_PUBLIC_KEY,
-        ZERO_REGISTRY_ADDRESS, ZERO_SIGNER, ZERO_TOKEN_ADDRESS, ZERO_USER,
+        INVALID_WITHDRAW_AMOUNT, MIN_WITHDRAW_AMOUNT_NOT_CHANGED, ONLY_SIGNER, ONLY_USER,
+        QUORUM_NOT_CHANGED, SIGNER_BLACKLISTED, SIGNER_NOT_REGISTERED, USER_ALREADY_REGISTERED,
+        USER_NOT_REGISTERED, ZERO_BTC_DESTINATION, ZERO_PUBLIC_KEY, ZERO_REGISTRY_ADDRESS,
+        ZERO_SIGNER, ZERO_TOKEN_ADDRESS, ZERO_USER,
     };
     use strkbtc_bridge::events::{
         DepositMinted, DepositQuorumSet, DepositWitnessed, MinWithdrawAmountSet, SignerRegistered,
@@ -250,6 +251,7 @@ pub mod bridge {
             self.roles.only_app_governor();
             self.assert_initialized();
             let old_min_withdraw_amount = self.min_withdraw_amount.read();
+            assert(old_min_withdraw_amount != min_withdraw_amount, MIN_WITHDRAW_AMOUNT_NOT_CHANGED);
             self.min_withdraw_amount.write(min_withdraw_amount);
             self
                 .emit(
@@ -270,6 +272,7 @@ pub mod bridge {
             self.assert_initialized();
             assert(quorum >= MIN_QUORUM, INVALID_QUORUM);
             let old_deposit_quorum = self.deposit_quorum.read();
+            assert(old_deposit_quorum != quorum, QUORUM_NOT_CHANGED);
             self.deposit_quorum.write(quorum);
             self
                 .emit(
