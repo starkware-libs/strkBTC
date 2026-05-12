@@ -6,7 +6,7 @@ The strkBTC bridge consists of three Starknet contracts and a set of independent
 
 **Starknet contracts:**
 
-- **strkBTC ERC20** — standard ERC20 with mint/burn permissions
+- **strkBTC ERC20** — standard ERC20 with mint/burn permissions. The deployed token uses the `ERC20Mintable` [class hash](https://voyager.online/class/0x00B45DBc3714180381c5680e41931172d67194D77D504413465390E0BEF194eC) , so its source is not maintained in this repository. Previous token implementations in this repo are not actually in use. Audit Report for `ERC20Mintable` can be seen in this repo.
 - **Bridge contract** — tracks deposit witnesses and triggers minting when the k-th signer confirms
 - **Registry contract** — stores withdrawal Bitcoin transactions and collects signer signatures
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["registry", "token", "bridge"]
+members = ["registry", "bridge"]
 
 [workspace.package]
 version = "0.1.0"

@@ -4,21 +4,6 @@
 
 ```mermaid
 classDiagram
-    class TokenContract {
-        erc20: ERC20Component
-        accesscontrol: AccessControlComponent
-        src5: SRC5Component
-        roles: RolesComponent
-        replaceability: ReplaceabilityComponent
-        ERC20_decimals: u8
-        permitted_minter: ContractAddress
-
-        permissioned_mint()
-        permissioned_burn()
-        is_permitted_minter()
-        increase_allowance()
-        decrease_allowance()
-    }
     class BridgeContract {
         accesscontrol: AccessControlComponent
         src5: SRC5Component
@@ -113,7 +98,6 @@ classDiagram
     BridgeContract ..> UserRemoved : emits
     BridgeContract ..> MinWithdrawAmountSet : emits
     BridgeContract ..> DepositQuorumSet : emits
-    BridgeContract --> TokenContract : mints / burns
     BridgeContract --> RegistryContract : register / remove / revoke signer
     RegistryContract ..> WithdrawSigned : emits
     WithdrawSigned o-- SignerSignatures
@@ -123,140 +107,17 @@ classDiagram
 
 ## Token Contract
 
-The `strkBTC` token is a Starkgate-compatible ERC-20 token on Starknet representing wrapped
-Bitcoin. It is minted when a BTC deposit is confirmed by the bridge and burned when a user
-requests a BTC withdrawal. The contract follows the Starkgate mintable token pattern with a
-single designated `permitted_minter` address (typically the bridge contract).
+The `strkBTC` token is a Starkgate-compatible mintable ERC-20 token deployed on Starknet
+representing wrapped Bitcoin. It is minted when a BTC deposit is confirmed by the bridge
+and burned when a user requests a BTC withdrawal, with a single designated
+`permitted_minter` address (the bridge contract) authorized to mint and burn.
 
-### Storage
-
-```rust
-struct Storage {
-    erc20: ERC20Component::Storage,
-    accesscontrol: AccessControlComponent::Storage,
-    src5: SRC5Component::Storage,
-    replaceability: ReplaceabilityComponent::Storage,
-    roles: RolesComponent::Storage,
-    /// Custom decimals storage (named for legacy Starkgate compatibility).
-    ERC20_decimals: u8,
-    /// The single address authorized to mint and burn tokens.
-    permitted_minter: ContractAddress,
-}
-```
-
-### Components
-
-| Component | Purpose |
-|-----------|---------|
-| `ERC20Component` | Standard fungible token (balances, allowances, transfer, approve) |
-| `AccessControlComponent` | Low-level role storage used by `RolesComponent` |
-| `SRC5Component` | Interface introspection (ERC-165 equivalent) |
-| `RolesComponent` | Governance and operator role management |
-| `ReplaceabilityComponent` | Upgradeable contract pattern with time-locked implementation replacement |
-
-### Constructor
-
-```rust
-fn constructor(
-    ref self: ContractState,
-    name: ByteArray,
-    symbol: ByteArray,
-    decimals: u8,
-    initial_supply: u256,
-    recipient: ContractAddress,
-    permitted_minter: ContractAddress,
-    governance_admin: ContractAddress,
-    upgrade_delay: u64,
-)
-```
-
-#### Logic
-
-1. Initializes the ERC-20 metadata with the given `name` and `symbol`.
-2. Sets `ERC20_decimals` to the given `decimals`.
-3. If `initial_supply > 0`, mints `initial_supply` tokens to `recipient`.
-4. Asserts `permitted_minter` is non-zero and writes it to storage.
-5. Initializes `RolesComponent` with `governance_admin` as the first governance admin.
-6. Initializes `ReplaceabilityComponent` with the given `upgrade_delay`.
-
-### Functions
-
-#### permissioned_mint
-
-```rust
-fn permissioned_mint(ref self: ContractState, account: ContractAddress, amount: u256)
-```
-
-Mints `amount` tokens to `account`.
-
-##### Access
-
-Only callable by the `permitted_minter` address.
-
-##### Logic
-
-1. Asserts the caller is the `permitted_minter`.
-2. Calls `erc20.mint(account, amount)`.
-
----
-
-#### permissioned_burn
-
-```rust
-fn permissioned_burn(ref self: ContractState, account: ContractAddress, amount: u256)
-```
-
-Burns `amount` tokens from `account`.
-
-##### Access
-
-Only callable by the `permitted_minter` address.
-
-##### Logic
-
-1. Asserts the caller is the `permitted_minter`.
-2. Calls `erc20.burn(account, amount)`.
-
----
-
-#### is_permitted_minter
-
-```rust
-fn is_permitted_minter(self: @ContractState, account: ContractAddress) -> bool
-```
-
-Returns `true` if `account` is the `permitted_minter`, `false` otherwise.
-
----
-
-#### increase_allowance
-
-```rust
-fn increase_allowance(
-    ref self: ContractState, spender: ContractAddress, added_value: u256,
-) -> bool
-```
-
-Increases the caller's allowance for `spender` by `added_value`. Returns `true`.
-
----
-
-#### decrease_allowance
-
-```rust
-fn decrease_allowance(
-    ref self: ContractState, spender: ContractAddress, subtracted_value: u256,
-) -> bool
-```
-
-Decreases the caller's allowance for `spender` by `subtracted_value`. Returns `true`.
-
-### Errors
-
-| Error | Description |
-|-------|-------------|
-| `INVALID_MINTER_ADDRESS` | `permitted_minter` passed to constructor is the zero address |
-| `MINTER_ONLY` | Caller is not the `permitted_minter` |
+The deployed `strkBTC` token uses a class hash that is **not** built from sources in this
+repository — an earlier in-tree token implementation existed during development, but the
+contract that was ultimately deployed (and later upgraded to its current class hash) is
+based on a different codebase. The bridge therefore depends only on the
+`IMintableToken` interface (`permissioned_mint` / `permissioned_burn`) exposed by that
+external token contract, and the token's source is intentionally not maintained here.
 
 ---
 
