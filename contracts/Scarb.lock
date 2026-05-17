@@ -192,13 +192,3 @@ dependencies = [
  "starkware_utils",
  "starkware_utils_testing",
 ]
-
-[[package]]
-name = "strkbtc_token"
-version = "0.1.0"
-dependencies = [
- "openzeppelin",
- "snforge_std",
- "starkware_utils",
- "starkware_utils_testing",
-]
