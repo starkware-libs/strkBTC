@@ -112,13 +112,6 @@ representing wrapped Bitcoin. It is minted when a BTC deposit is confirmed by th
 and burned when a user requests a BTC withdrawal, with a single designated
 `permitted_minter` address (the bridge contract) authorized to mint and burn.
 
-The deployed `strkBTC` token uses a class hash that is **not** built from sources in this
-repository — an earlier in-tree token implementation existed during development, but the
-contract that was ultimately deployed (and later upgraded to its current class hash) is
-based on a different codebase. The bridge therefore depends only on the
-`IMintableToken` interface (`permissioned_mint` / `permissioned_burn`) exposed by that
-external token contract, and the token's source is intentionally not maintained here.
-
 ---
 
 ## Registry Contract
